@@ -231,20 +231,17 @@ __global__ void __launch_bounds__(STREAMING_BLOCK_THREADS, 1)
     for (int ks = 0; ks < D_ROPE / 16; ++ks) {
       const int cand_row_base = warp_first_cand;
       const bf16* rope_row = sm_kv_rope + (size_t)(cand_row_base + gid) * D_ROPE + ks * 16;
-      const uint32_t b0 = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2);
-      const uint32_t b1 = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2 + 8);
+      auto rB = cute::make_tensor<uint32_t>(cute::make_layout(cute::_2{}));
+      rB(0) = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2);
+      rB(1) = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2 + 8);
 #pragma unroll
       for (int group = 0; group < VALID_HEAD_GROUPS; ++group) {
-        uint32_t a0, a1, a2, a3;
+        auto rA = cute::make_tensor<uint32_t>(cute::make_layout(cute::_4{}));
         const int row = (lane & 7) + ((lane >> 3) & 1) * 8;
         const int col = ks * 16 + (lane >> 4) * 8;
-        cute_ldsm4(a0, a1, a2, a3, sm.q_rope(group) + CutePrefillQRopeLayout{}(row, col));
-        CuteMmaResult r = cute_mma_rope(a0, a1, a2, a3, b0, b1, qk[group][0][0], qk[group][0][1],
-                                        qk[group][0][2], qk[group][0][3]);
-        qk[group][0][0] = r.d0;
-        qk[group][0][1] = r.d1;
-        qk[group][0][2] = r.d2;
-        qk[group][0][3] = r.d3;
+        cute_ldsm4(sm.q_rope(group) + CutePrefillQRopeLayout{}(row, col), rA);
+        auto rC = cute::make_tensor(&qk[group][0][0], cute::make_layout(cute::_4{}));
+        cute::MMA_Atom<RopeMma>{}.call(rA, rB, rC);
       }
     }
 
@@ -447,12 +444,12 @@ __global__ void __launch_bounds__(STREAMING_BLOCK_THREADS, 1)
     const int rope_dim_base = warp_id * ROPE_DIMS_PER_WARP;
 #pragma unroll
     for (int ks = 0; ks < ROPE_K_ITERS; ++ks) {
-      uint32_t rope_a0[STREAMING_HEAD_GROUPS], rope_a1[STREAMING_HEAD_GROUPS];
-      uint32_t rope_a2[STREAMING_HEAD_GROUPS], rope_a3[STREAMING_HEAD_GROUPS];
+      auto rA = cute::make_tensor<uint32_t>(
+          cute::make_layout(cute::make_shape(cute::_4{}, cute::Int<STREAMING_HEAD_GROUPS>{})));
 #pragma unroll
       for (int group = 0; group < VALID_HEAD_GROUPS; ++group) {
-        cute_load_rope_a(rope_a0[group], rope_a1[group], rope_a2[group], rope_a3[group],
-                         sm.p_full(group) + ks * 16, STREAMING_P_STRIDE, lane);
+        auto rAg = rA(cute::_, group);
+        cute_load_rope_a(sm.p_full(group) + ks * 16, STREAMING_P_STRIDE, lane, rAg);
       }
 #pragma unroll
       for (int nt = 0; nt < ROPE_N_TILES; ++nt) {
@@ -471,18 +468,13 @@ __global__ void __launch_bounds__(STREAMING_BLOCK_THREADS, 1)
             *reinterpret_cast<const uint16_t*>(sm_kv_rope + (size_t)ent8 * D_ROPE + col);
         const uint16_t v9 =
             *reinterpret_cast<const uint16_t*>(sm_kv_rope + (size_t)ent9 * D_ROPE + col);
-        const uint32_t b0 = (uint32_t)v0 | ((uint32_t)v1 << 16);
-        const uint32_t b1 = (uint32_t)v8 | ((uint32_t)v9 << 16);
+        auto rB = cute::make_tensor<uint32_t>(cute::make_layout(cute::_2{}));
+        rB(0) = (uint32_t)v0 | ((uint32_t)v1 << 16);
+        rB(1) = (uint32_t)v8 | ((uint32_t)v9 << 16);
 #pragma unroll
         for (int group = 0; group < VALID_HEAD_GROUPS; ++group) {
-          CuteMmaResult r =
-              cute_mma_rope(rope_a0[group], rope_a1[group], rope_a2[group], rope_a3[group], b0, b1,
-                            acc_rope[group][nt][0], acc_rope[group][nt][1], acc_rope[group][nt][2],
-                            acc_rope[group][nt][3]);
-          acc_rope[group][nt][0] = r.d0;
-          acc_rope[group][nt][1] = r.d1;
-          acc_rope[group][nt][2] = r.d2;
-          acc_rope[group][nt][3] = r.d3;
+          auto rC = cute::make_tensor(&acc_rope[group][nt][0], cute::make_layout(cute::_4{}));
+          cute::MMA_Atom<RopeMma>{}.call(rA(cute::_, group), rB, rC);
         }
       }
     }

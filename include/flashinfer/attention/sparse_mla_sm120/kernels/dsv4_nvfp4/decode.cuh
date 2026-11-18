@@ -184,22 +184,19 @@ __global__ void __launch_bounds__(DECODE_BLOCK_THREADS) sparse_mla_decode_dsv4_n
 
 #pragma unroll
     for (int ks = 0; ks < D_ROPE_C / 16; ++ks) {
-      uint32_t a0, a1, a2, a3;
+      auto rA = cute::make_tensor<uint32_t>(cute::make_layout(cute::_4{}));
       const int row = (lane & 7) + ((lane >> 3) & 1) * 8;
       const int col = ks * 16 + (lane >> 4) * 8;
-      cute_ldsm4(a0, a1, a2, a3, sm.q_rope() + CutePrefillQRopeLayout{}(row, col));
+      cute_ldsm4(sm.q_rope() + CutePrefillQRopeLayout{}(row, col), rA);
 #pragma unroll
       for (int nt = 0; nt < DECODE_QK_N_TILES; ++nt) {
         const int cand_row_base = warp_first_cand + nt * 8;
         const bf16* rope_row = sm_kv_rope + (size_t)(cand_row_base + gid) * D_ROPE_C + ks * 16;
-        const uint32_t b0 = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2);
-        const uint32_t b1 = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2 + 8);
-        CuteMmaResult r =
-            cute_mma_rope(a0, a1, a2, a3, b0, b1, qk[nt][0], qk[nt][1], qk[nt][2], qk[nt][3]);
-        qk[nt][0] = r.d0;
-        qk[nt][1] = r.d1;
-        qk[nt][2] = r.d2;
-        qk[nt][3] = r.d3;
+        auto rB = cute::make_tensor<uint32_t>(cute::make_layout(cute::_2{}));
+        rB(0) = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2);
+        rB(1) = *reinterpret_cast<const uint32_t*>(rope_row + tid * 2 + 8);
+        auto rC = cute::make_tensor(&qk[nt][0], cute::make_layout(cute::_4{}));
+        cute::MMA_Atom<RopeMma>{}.call(rA, rB, rC);
       }
     }
 
@@ -362,9 +359,9 @@ __global__ void __launch_bounds__(DECODE_BLOCK_THREADS) sparse_mla_decode_dsv4_n
     const int rope_dim_base = warp_id * ROPE_DIMS_PER_WARP;
 #pragma unroll
     for (int ks = 0; ks < ROPE_K_ITERS; ++ks) {
-      uint32_t a0, a1, a2, a3;
-      cute_load_rope_a(a0, a1, a2, a3, reinterpret_cast<const bf16*>(&sm_p_full[0][ks * 16]),
-                       DECODE_CAND_WINDOW, lane);
+      auto rA = cute::make_tensor<uint32_t>(cute::make_layout(cute::_4{}));
+      cute_load_rope_a(reinterpret_cast<const bf16*>(&sm_p_full[0][ks * 16]), DECODE_CAND_WINDOW,
+                       lane, rA);
 #pragma unroll
       for (int nt = 0; nt < ROPE_N_TILES; ++nt) {
         const int n_col = rope_dim_base + nt * 8;
@@ -382,14 +379,11 @@ __global__ void __launch_bounds__(DECODE_BLOCK_THREADS) sparse_mla_decode_dsv4_n
             *reinterpret_cast<const uint16_t*>(sm_kv_rope + (size_t)ent8 * D_ROPE_C + col);
         const uint16_t v9 =
             *reinterpret_cast<const uint16_t*>(sm_kv_rope + (size_t)ent9 * D_ROPE_C + col);
-        const uint32_t b0 = (uint32_t)v0 | ((uint32_t)v1 << 16);
-        const uint32_t b1 = (uint32_t)v8 | ((uint32_t)v9 << 16);
-        CuteMmaResult r = cute_mma_rope(a0, a1, a2, a3, b0, b1, acc_rope[nt][0], acc_rope[nt][1],
-                                        acc_rope[nt][2], acc_rope[nt][3]);
-        acc_rope[nt][0] = r.d0;
-        acc_rope[nt][1] = r.d1;
-        acc_rope[nt][2] = r.d2;
-        acc_rope[nt][3] = r.d3;
+        auto rB = cute::make_tensor<uint32_t>(cute::make_layout(cute::_2{}));
+        rB(0) = (uint32_t)v0 | ((uint32_t)v1 << 16);
+        rB(1) = (uint32_t)v8 | ((uint32_t)v9 << 16);
+        auto rC = cute::make_tensor(&acc_rope[nt][0], cute::make_layout(cute::_4{}));
+        cute::MMA_Atom<RopeMma>{}.call(rA, rB, rC);
       }
     }
 

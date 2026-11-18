@@ -1,4 +1,15 @@
-"""Native FP4 prefill specializations through the FlashInfer execution binding."""
+"""NVFP4 prefill math, mega-fusion boundaries, and buffer-layout contracts.
+
+Use explicit prefill plans to exercise 16/32/64-head specializations, ragged
+sparse selections, and attention sinks. Check output against an independent
+reference and LSE against FP64 math with NVFP4-quantized Q. Exact agreement
+with separate RoPE/attention/output-quantization kernels checks fusion
+boundaries; that comparison is not an independent attention implementation.
+
+Replay CUDA graphs after changing positions, lengths, and invalid indices.
+Also cover infinite sinks, offset query views, and padded KV page strides.
+These tests do not establish automatic routing performance.
+"""
 
 import pytest
 import torch

@@ -519,8 +519,10 @@ def native_prefill_calls(f, module=None, *, streaming_prefill=True, chunks_per_b
         )
 
     def mega():
+        args = list(arguments(q))
+        args[6] = q  # Match run_mega: the BF16 output descriptor is unused.
         module.dsv4_nvfp4_execute_attention_rope_fp8(
-            *arguments(q),
+            *args,
             f["positions"],
             f["cs"],
             f["out"].view(torch.uint8),

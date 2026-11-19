@@ -150,6 +150,8 @@ __global__ void __launch_bounds__(DECODE_BLOCK_THREADS) sparse_mla_decode_dsv4_n
   float acc_rope[ROPE_N_TILES][4] = {0};
   float global_max[2] = {-1e30f, -1e30f};
   float global_sum[2] = {0.f, 0.f};
+  const auto copy_rope_a = cute::make_tiled_copy_A(
+      cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, uint16_t>{}, cute::make_tiled_mma(RopeMma{}));
   uint32_t raw_ready_phase = 0;
   int raw_consumer_slot = 0;
 
@@ -185,9 +187,10 @@ __global__ void __launch_bounds__(DECODE_BLOCK_THREADS) sparse_mla_decode_dsv4_n
 #pragma unroll
     for (int ks = 0; ks < D_ROPE_C / 16; ++ks) {
       auto rA = cute::make_tensor<uint32_t>(cute::make_layout(cute::_4{}));
-      const int row = (lane & 7) + ((lane >> 3) & 1) * 8;
-      const int col = ks * 16 + (lane >> 4) * 8;
-      cute_ldsm4(sm.q_rope() + CutePrefillQRopeLayout{}(row, col), rA);
+      auto sQ = cute::make_tensor(cute::make_smem_ptr(sm.q_rope()), CutePrefillQRopeLayout{});
+      auto sQTile = cute::local_tile(sQ, cute::Shape<cute::_16, cute::_16>{},
+                                     cute::make_coord(cute::_0{}, ks));
+      copy_mma_operand<uint16_t, 8>(copy_rope_a, cute::recast<uint16_t>(sQTile), rA, lane);
 #pragma unroll
       for (int nt = 0; nt < DECODE_QK_N_TILES; ++nt) {
         const int cand_row_base = warp_first_cand + nt * 8;
@@ -360,8 +363,11 @@ __global__ void __launch_bounds__(DECODE_BLOCK_THREADS) sparse_mla_decode_dsv4_n
 #pragma unroll
     for (int ks = 0; ks < ROPE_K_ITERS; ++ks) {
       auto rA = cute::make_tensor<uint32_t>(cute::make_layout(cute::_4{}));
-      cute_load_rope_a(reinterpret_cast<const bf16*>(&sm_p_full[0][ks * 16]), DECODE_CAND_WINDOW,
-                       lane, rA);
+      auto sP =
+          cute::make_tensor(cute::make_smem_ptr(&sm_p_full[0][ks * 16]),
+                            cute::Layout<cute::Shape<cute::_16, cute::_16>,
+                                         cute::Stride<cute::Int<DECODE_CAND_WINDOW>, cute::_1>>{});
+      copy_mma_operand<uint16_t, 8>(copy_rope_a, cute::recast<uint16_t>(sP), rA, lane);
 #pragma unroll
       for (int nt = 0; nt < ROPE_N_TILES; ++nt) {
         const int n_col = rope_dim_base + nt * 8;
